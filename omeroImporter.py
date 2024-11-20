@@ -8,6 +8,8 @@ import shutil
 import re
 import pandas as pd
 import xlrd
+import xlwings
+import ezomero
 
 # BACKBLAZE
 import boto3  # REQUIRED! - Details here: https://pypi.org/project/boto3/
@@ -37,14 +39,22 @@ from omero.gateway import (
     ImageWrapper,
     MapAnnotationWrapper,
     TagAnnotationWrapper,
+    PlateWrapper,
+    ScreenWrapper,
 )
 from omero.model import (
     ProjectI,
     DatasetI,
     ImageI,
     ProjectDatasetLinkI,
+    ScreenPlateLinkI,
+    PlateI,
+    WellI,
+    WellSampleI,
+    ScreenI,
 )
 from omero.gateway import BlitzGateway
+from omero.rtypes import rint
 
 dateFormatter = "%d-%m-%Y_%H-%M-%S"
 
@@ -93,25 +103,31 @@ import_status_id = "id"
 import_path = "path"
 import_annotate = "annotated"
 
-metadata_datasets = "datasets"
-metadata_images = "images"
-metadata_image_name = "Image_Name"
-metadata_image_new_name = "New_Image_Name"
-metadata_image_path = "Image_Path"
+metadata_plates = "plates"
+metadata_wells = "wells"
+metadata_well_name = "Well_Name"
+metadata_OME_Image_Name = "OME_Image_Name"
+metadata_file_path = "File_Path"
 metadata_image_mma = "MMA_File_Path"
 metadata_image_tags1 = "Tags"
 metadata_image_tags2 = "Τags"
 
 excel_module_ome = "OMERO specific"
-excel_project = 0
-excel_projectName = "Project_Name"
-excel_dataset = 1
-excel_datasetName = "Dataset_Name"
-excel_imageList = 2
+
+excel_screen = 0
+excel_screenName = 'Screen_Name'
+
+excel_plate = 1
+excel_plateName = "Plate_Name"
+
+excel_plateMap = 2
 excel_module = "Module"
 excel_key = "Key"
 excel_value = "Value"
 excel_replaceNaN = "EMPTY-PD-VALUE"
+
+excel_plateMapTableStartCell = "A14"
+excel_datasetCell = "C10"
 
 
 class WrappedException(Exception):
@@ -742,17 +758,17 @@ def collectMetadataFromCSV(path):
     for projectKey in projects:
         data[projectKey] = projects[projectKey]
     for projectKey in datasets:
-        if metadata_datasets not in data[projectKey]:
-            data[projectKey][metadata_datasets] = {}
+        if metadata_plates not in data[projectKey]:
+            data[projectKey][metadata_plates] = {}
         for datasetKey in datasets[projectKey]:
-            data[projectKey][metadata_datasets][datasetKey] = datasets[projectKey][
+            data[projectKey][metadata_plates][datasetKey] = datasets[projectKey][
                 datasetKey
             ]
     for projectKey in images:
         for datasetKey in images[projectKey]:
-            if metadata_images not in data[projectKey][metadata_datasets][datasetKey]:
-                data[projectKey][metadata_datasets][datasetKey][metadata_images] = {}
-            data[projectKey][metadata_datasets][datasetKey][metadata_images] = images[
+            if metadata_wells not in data[projectKey][metadata_plates][datasetKey]:
+                data[projectKey][metadata_plates][datasetKey][metadata_wells] = {}
+            data[projectKey][metadata_plates][datasetKey][metadata_wells] = images[
                 projectKey
             ][datasetKey]
     printToConsole("Data:")
@@ -788,6 +804,7 @@ def parseImageListSpreadsheetData(ssData):
 
 
 def parseSpreadsheetData(ssData, objectNameKey):
+    
     data = {}
     objectData = {}
     module = None
@@ -819,42 +836,167 @@ def parseSpreadsheetData(ssData, objectNameKey):
 
 def collectMetadataFromExcel(path):
     data = {}
+    excelPath = None
     targetPath = pathlib.Path(path).resolve()
     for path in targetPath.iterdir():
         if path.is_dir():
             continue
         name = path.name
         if ".xlsx" in name or ".xlsm" in name:
-            ssFileProjectData = pd.read_excel(
-                path, sheet_name=excel_project, header=8
+            excelPath = path
+            ssFileScreenData = pd.read_excel(
+                path, sheet_name=excel_screen, header=8
             ).fillna(excel_replaceNaN)
-            ssProjectData = parseSpreadsheetData(ssFileProjectData, excel_projectName)
-            projectName = list(ssProjectData.keys())[0]
-            if projectName not in data:
+            ssScreenData = parseSpreadsheetData(ssFileScreenData, excel_screenName)
+            screenName = list(ssScreenData.keys())[0]
+
+            if screenName not in data:
                 # TODO IF PROJECT NAME CHANGED IN SAME PROJECT DIRECTORY IF OVERRIDE OVERRIDE IF NOT SEND ERROR EMAIL
-                data.update(ssProjectData)
-            if metadata_datasets not in data[projectName]:
-                data[projectName][metadata_datasets] = {}
-            ssFileDatasetData = pd.read_excel(
-                path, sheet_name=excel_dataset, header=8
+                data.update(ssScreenData)
+
+            if metadata_plates not in data[screenName]:
+                data[screenName][metadata_plates] = {}
+            ssFilePlateData = pd.read_excel(
+                path, sheet_name=excel_plate, header=8
             ).fillna(excel_replaceNaN)
-            ssDatasetData = parseSpreadsheetData(ssFileDatasetData, excel_datasetName)
-            datasetName = list(ssDatasetData.keys())[0]
-            if datasetName not in data[projectName][metadata_datasets]:
-                data[projectName][metadata_datasets].update(ssDatasetData)
-            if metadata_images not in data[projectName][metadata_datasets][datasetName]:
-                data[projectName][metadata_datasets][datasetName][metadata_images] = {}
-            ssFileImageListData = pd.read_excel(
-                path, sheet_name=excel_imageList, header=12
+            ssPlateData = parseSpreadsheetData(ssFilePlateData, excel_plateName)
+            plateName = list(ssPlateData.keys())[0]
+
+
+            if plateName not in data[screenName][metadata_plates]:
+                data[screenName][metadata_plates].update(ssPlateData)
+            if metadata_wells not in data[screenName][metadata_plates][plateName]:
+                data[screenName][metadata_plates][plateName][metadata_wells] = {}
+            ssFileWellListData = pd.read_excel(
+                path, sheet_name=excel_plateMap, header=12
             ).fillna(excel_replaceNaN)
-            ssImageListData = parseImageListSpreadsheetData(ssFileImageListData)
-            data[projectName][metadata_datasets][datasetName][
-                metadata_images
-            ] = ssImageListData
+            ssPlateMapData = parseImageListSpreadsheetData(ssFileWellListData)
+            data[screenName][metadata_plates][plateName][
+                metadata_wells
+            ] = ssPlateMapData
+
     printToConsole("Data:")
     printToConsole(str(data))
-    return data
+    return data, excelPath
 
+# This function returns the data from an excel file, starting at a specific cell and reading onwards.
+def readExcelTable(file):
+    wb = xlwings.Book(file)
+
+    sheet = wb.sheets[excel_plateMap]
+    datasetSheet = wb.sheets[excel_plate]
+
+    #Define the range starting from the startCell until the end of the sheet
+    data = sheet.range(excel_plateMapTableStartCell).expand().value
+    datasetData = datasetSheet[excel_datasetCell].value.strip()
+    
+    wb.close()
+
+    return data, datasetData
+
+#create a plate for a specific screen
+def createPlate(conn,name, screenId):
+    plate = PlateWrapper(conn,PlateI())
+    plate.setName(name)
+    plate.save()
+    plateId = plate.getId()
+
+    #link the plate to the screen
+    list = []
+    list.append(plateId)
+    ezomero.link_plates_to_screen(conn,list,screenId)
+    return plateId
+
+
+# verifys if each image has been added to a site in a well. If not, then it adds the image
+# siteCount: number of sites used in a well. images: the list of images being used
+def addSitesToWells(conn,screenId,plateId,siteCount,images):
+    # imageList = []
+    # #separate the images by _
+    # for image in images:
+    #     x = image.split("_")
+    #     imageList.append(x)
+
+    #we will add the images in site 1 first, then site 2...
+    for i in range(1,siteCount+1):
+        for image in images:
+            if int(image[5][1:]) == i:
+
+                # #get current plate id
+                # plateId = ""
+                # for plate in conn.getObjects("plate",attributes={'name':image[0]},opts={'screen':screenId}):
+                #     plateId = plate.getId()
+
+                #get current image id
+                imageId = None
+                serverImages = conn.getObjects("Image", attributes={"name": image[2]})
+                for serverImage in serverImages:
+                    imageId = serverImage.getId()
+
+                #get well coords
+                row,col = getWellCoords(image[0])
+
+                #if the site doesnt exist already,create or add to well
+                if not checkIfSiteIsSet(conn,i,plateId,row-1,col-1):
+                    createOrAddToWell(conn,i,plateId,imageId,row-1,col-1)
+
+
+#either create a well if the site is 1, or add to it if it already exists and the site > 1
+#siteNum the site id
+#image: the image to be used
+# row, col: the row and column of a well
+def createOrAddToWell(conn,siteNum,plateId,imageId,row,col):
+    if siteNum == 1:
+        createWell(conn,plateId,row,col,imageId)
+    else:
+        #find the id of our selected well
+        wellId = None
+        plate = conn.getObject("plate",plateId)
+        wells = plate.listChildren()
+        for well in wells:
+            if well.getRow() == row and well.getColumn() == col:
+                wellId = well.getId()
+                wellWrapper = conn.getObject("well",wellId, opts={"load_images": True})
+                well = wellWrapper._obj
+
+                createWellSample(conn,well,imageId)
+
+
+def createWell(conn,plateId, row, col, imageId):
+    well = WellI()
+    well.setPlate(PlateI(plateId, False))
+    well.setColumn(rint(col))
+    well.setRow(rint(row))
+    well.setPlate(PlateI(plateId, False))
+
+    #Create Well Sample with Image
+    createWellSample(conn,well,imageId)
+
+
+# create a well sample with a given image
+def createWellSample(conn,well,imageId):
+    ws = WellSampleI()
+    ws.setImage(ImageI(imageId,False))
+    well.addWellSample(ws)
+    update_service = conn.getUpdateService()
+    update_service.saveObject(well)
+
+
+#used to check if a site has been set already. returns true/false
+def checkIfSiteIsSet(conn,siteId,plateId,row,col):
+    plate = conn.getObject("plate",plateId)
+    for well in plate.listChildren():
+        if well.getRow() == row and well.getColumn() == col:
+            wellSamples = well.listChildren()
+            numSites = len(list(wellSamples))
+            return numSites >= siteId
+    return False
+
+# This function converts wellId's to row-column format ex. E04 -> 5-4
+def getWellCoords(input):
+    col = int(input[1:])
+    row = ord(input[0]) - ord('A') + 1
+    return row,col
 
 def main(argv, argc):
     if len(argv) > 1 and argv[1] == "-h":
@@ -944,6 +1086,9 @@ def main(argv, argc):
     userPSW_g = None
     emailTo = None
     isAdmin = False
+
+    # Path to the Excel file
+    excelFile = None
 
     for i in range(1, argc):
         arg = argv[i]
@@ -1639,7 +1784,7 @@ def main(argv, argc):
             data = None
             namespace = omero.constants.metadata.NSCLIENTMAPANNOTATION
             try:
-                data = collectMetadataFromExcel(projectPath)
+                data,excelFile = collectMetadataFromExcel(projectPath)
             except WrappedException as e:
                 error = e.message
                 writeToLog(error)
@@ -1662,106 +1807,109 @@ def main(argv, argc):
                 )
             if data == None or data == {}:
                 continue
-            for projectKey in data:
-                project = data[projectKey]
-                projectFullImportedData = None
-                projectCurrentImportedData = None
-                if userFullImportedData != None and projectKey in userFullImportedData:
-                    projectFullImportedData = userFullImportedData[projectKey]
-                if projectKey not in userCurrentImportedData:
-                    currentImportedData[userFolder][projectKey] = {}
-                projectCurrentImportedData = currentImportedData[userFolder][projectKey]
-                projectID = None
+            
+            
+            for screenKey in data:
+                screen = data[screenKey]
+                screenFullImportedData = None
+                screenCurrentImportedData = None
+                if userFullImportedData != None and screenKey in userFullImportedData:
+                    screenFullImportedData = userFullImportedData[screenKey]
+                if screenKey not in userCurrentImportedData:
+                    currentImportedData[userFolder][screenKey] = {}
+                screenCurrentImportedData = currentImportedData[userFolder][screenKey]
+                screenID = None
                 omeProject = None
-                projectQName = os.path.join(userFolder, projectKey)
-                projectCurrentImportedData[import_path] = projectQName
-                if projectFullImportedData == None:
-                    omeProject = userConn.getObject(
-                        "Project", attributes={"name": projectKey}
+                screenQName = os.path.join(userFolder, screenKey)
+                screenCurrentImportedData[import_path] = screenQName
+
+                # continue from here
+                if screenFullImportedData == None:
+                    omeScreen = userConn.getObject(
+                        "Screen", attributes={"name": screenKey}
                     )
-                    if omeProject == None:
-                        newProject = ProjectWrapper(userConn, ProjectI())
-                        newProject.setName(projectKey)
-                        newProject.save()
-                        omeProject = newProject
-                        projectCurrentImportedData[import_status] = (
+                    if omeScreen == None:
+                        newScreen = ScreenWrapper(userConn, ScreenI())
+                        newScreen.setName(screenKey)
+                        newScreen.save()
+                        omeScreen = newScreen
+                        screenCurrentImportedData[import_status] = (
                             import_status_imported
                         )
-                        projectID = newProject._obj.id.val
+                        screenID = newScreen._obj.id.val
                         writeToLog(
-                            "Project created for "
-                            + projectQName
+                            "Screen created for "
+                            + screenQName
                             + " ("
-                            + str(projectID)
+                            + str(screenID)
                             + ")"
                         )
                         hasNewImport = True
                     else:
-                        projectID = omeProject._obj.id.val
-                        projectCurrentImportedData[import_status] = import_status_found
+                        ID = omeScreen._obj.id.val
+                        screenCurrentImportedData[import_status] = import_status_found
                         writeToLog(
-                            "Project found for "
-                            + projectQName
+                            "Screen found for "
+                            + screenQName
                             + " ("
-                            + str(projectID)
+                            + str(screenID)
                             + ")"
                         )
                 else:
-                    projectID = projectFullImportedData[import_status_id]
-                    omeProject = userConn.getObject("Project", projectID)
-                    projectCurrentImportedData[import_status] = import_status_pimported
+                    screenID = screenFullImportedData[import_status_id]
+                    omeScreen = userConn.getObject("Screen", screenID)
+                    screenCurrentImportedData[import_status] = import_status_pimported
                     writeToLog(
-                        "Project previously imported for "
-                        + projectQName
+                        "Screen previously imported for "
+                        + screenQName
                         + " ("
-                        + str(projectID)
+                        + str(screenID)
                         + ")"
                     )
-
-                projectCurrentImportedData[import_status_id] = projectID
+                screenCurrentImportedData[import_status_id] = screenID
 
                 # TODO should we always update the annotation? or only if not previously imported?
                 # ATM only if not previously imported
 
-                projectKeyValueData = []
+                screenKeyValueData = []
                 # projectKeyValueData = {}
                 # for projAnnKey in project:
                 #     if projAnnKey == metadata_datasets:
                 #         continue
                 #     projectKeyValueData.append([projAnnKey, project[projAnnKey]])
-                for moduleKey in project:
-                    if moduleKey == metadata_datasets or moduleKey == excel_module_ome:
+                for moduleKey in screen:
+                    if moduleKey == metadata_plates or moduleKey == excel_module_ome:
                         continue
-                    projectKeyValueData.append([moduleKey, ""])
-                    for projAnnKey in project[moduleKey]:
-                        value = project[moduleKey][projAnnKey]
+                    screenKeyValueData.append([moduleKey, ""])
+                    for screenAnnKey in screen[moduleKey]:
+                        value = screen[moduleKey][screenAnnKey]
                         dataSplit = None
-                        if "description" not in projAnnKey.lower() and isinstance(
+                        if "description" not in screenAnnKey.lower() and isinstance(
                             value, str
                         ):
                             dataSplit = value.split(",")
                         if dataSplit != None and len(dataSplit) > 1:
                             for i in range(0, len(dataSplit)):
-                                projectKeyValueData.append(
-                                    [projAnnKey + "_" + str(i), str(dataSplit[i])]
+                                screenKeyValueData.append(
+                                    [screenAnnKey + "_" + str(i), str(dataSplit[i])]
                                 )
                         else:
-                            projectKeyValueData.append([projAnnKey, str(value)])
+                            screenKeyValueData.append([screenAnnKey, str(value)])
                 if (
-                    projectFullImportedData == None
-                    or import_annotate not in projectFullImportedData
+                    screenFullImportedData == None
+                    or import_annotate not in screenFullImportedData
                     # or projectFullImportedData[import_annotate] == False
                 ):
-                    if len(projectKeyValueData) > 0:
-                        newProjMapAnn = MapAnnotationWrapper(userConn)
-                        newProjMapAnn.setNs(namespace)
-                        newProjMapAnn.setValue(projectKeyValueData)
+                    if len(screenKeyValueData) > 0:
+                        newScreenMapAnn = MapAnnotationWrapper(userConn)
+                        newScreenMapAnn.setNs(namespace)
+                        newScreenMapAnn.setValue(screenKeyValueData)
                         # newProjMapAnn.setNs(moduleKey)
                         # newProjMapAnn.setValue(projectKeyValueData[moduleKey])
-                        newProjMapAnn.save()
-                        omeProject.linkAnnotation(newProjMapAnn)
-                        projectCurrentImportedData[import_annotate] = (
-                            newProjMapAnn._obj.id.val
+                        newScreenMapAnn.save()
+                        omeScreen.linkAnnotation(newScreenMapAnn)
+                        screenCurrentImportedData[import_annotate] = (
+                            newScreenMapAnn._obj.id.val
                         )
                         # if not import_annotate in projectCurrentImportedData:
                         #     projectCurrentImportedData[import_annotate] = {}
@@ -1770,9 +1918,9 @@ def main(argv, argc):
                         # ] = newProjMapAnn._obj.id.val
                         writeToLog(
                             "Annotation created for "
-                            + projectQName
+                            + screenQName
                             + " ("
-                            + str(projectID)
+                            + str(screenID)
                             + ")"
                         )
                         # writeToLog(
@@ -1784,29 +1932,31 @@ def main(argv, argc):
                         #     + str(projectID)
                         #     + ")"
                         # )
-                        hasNewImport = True
-                else:
-                    if len(projectKeyValueData) > 0:
-                        projMapAnnID = projectFullImportedData[import_annotate]
-                        newProjMapAnn = userConn.getObject(
-                            "MapAnnotation", projMapAnnID
-                        )
-                        newProjMapAnn.setValue(projectKeyValueData)
-                        newProjMapAnn.save()
-                    writeToLog(
-                        "Annotation updated for "
-                        + projectQName
-                        + " ("
-                        + str(projectID)
-                        + ")"
-                    )
-                    hasNewImport = True
-
+                #         hasNewImport = True
+                # else:
+                #     if len(projectKeyValueData) > 0:
+                #         projMapAnnID = projectFullImportedData[import_annotate]
+                #         newProjMapAnn = userConn.getObject(
+                #             "MapAnnotation", projMapAnnID
+                #         )
+                #         print("**********")
+                #         print(newProjMapAnn)
+                #         newProjMapAnn.setValue(projectKeyValueData)
+                #         newProjMapAnn.save()
+                #     writeToLog(
+                #         "Annotation updated for "
+                #         + projectQName
+                #         + " ("
+                #         + str(projectID)
+                #         + ")"
+                #     )
+                #     hasNewImport = True
                 if omeUserName != None:
                     userConn.close()
 
-                for datasetKey in project[metadata_datasets]:
-                    dataset = project[metadata_datasets][datasetKey]
+                
+                for plateKey in screen[metadata_plates]:
+                    plate = screen[metadata_plates][plateKey]
 
                     if omeUserName != None:
                         userConn = conn.suConn(omeUserName)
@@ -1814,139 +1964,140 @@ def main(argv, argc):
                     else:
                         userConn = conn
 
-                    datasetFullImportedData = None
-                    datasetCurrentImportedData = None
+                    plateFullImportedData = None
+                    plateCurrentImportedData = None
                     if (
-                        projectFullImportedData != None
-                        and datasetKey in projectFullImportedData
+                        screenFullImportedData != None
+                        and plateKey in screenFullImportedData
                     ):
-                        datasetFullImportedData = projectFullImportedData[datasetKey]
-                    if datasetKey not in projectCurrentImportedData:
-                        projectCurrentImportedData[datasetKey] = {}
-                    datasetCurrentImportedData = projectCurrentImportedData[datasetKey]
-                    datasetID = None
-                    omeDataset = None
-                    datasetQName = os.path.join(projectQName, datasetKey)
-                    datasetCurrentImportedData[import_path] = datasetQName
-                    if datasetFullImportedData == None:
-                        dsIDs = ezome.get_dataset_ids(userConn, project=projectID)
-                        omeDataset = None
-                        for dsID in dsIDs:
-                            omeDS = userConn.getObject("Dataset", dsID)
-                            if omeDS.getName() == datasetKey:
-                                omeDataset = omeDS
+                        plateFullImportedData = screenFullImportedData[plateKey]
+                    if plateKey not in screenCurrentImportedData:
+                        screenCurrentImportedData[plateKey] = {}
+                    plateCurrentImportedData = screenCurrentImportedData[plateKey]
+                    plateID = None
+                    omePlate = None
+                    print(screenQName, plateKey)
+                    plateQName = os.path.join(screenQName, plateKey)
+                    plateCurrentImportedData[import_path] = plateQName
+                    if plateFullImportedData == None:
+                        plIDs = ezome.get_plate_ids(userConn, screen=screenID)
+                        omePlate = None
+                        for plID in plIDs:
+                            omePL = userConn.getObject("Plate", plID)
+                            if omePL.getName() == plateKey:
+                                omePlate = omePL
                         # omeDataset = userConn.getObject(
                         #     "Dataset", attributes={"name": datasetKey}
                         # )
-                        if omeDataset == None:
-                            newDataset = DatasetWrapper(userConn, DatasetI())
-                            newDataset.setName(datasetKey)
-                            newDataset.save()
-                            omeDataset = newDataset
-                            datasetID = newDataset._obj.id.val
-                            link = ProjectDatasetLinkI()
-                            link.setChild(DatasetI(datasetID, False))
-                            link.setParent(ProjectI(projectID, False))
+                        if omePlate == None:
+                            newPlate = PlateWrapper(userConn, PlateI())
+                            newPlate.setName(plateKey)
+                            newPlate.save()
+                            omePlate = newPlate
+                            plateID = newPlate._obj.id.val
+                            link = ScreenPlateLinkI()
+                            link.setChild(PlateI(plateID, False))
+                            link.setParent(ScreenI(screenID, False))
                             userConn.getUpdateService().saveObject(link)
-                            datasetCurrentImportedData[import_status] = (
+                            plateCurrentImportedData[import_status] = (
                                 import_status_imported
                             )
                             writeToLog(
-                                "Dataset created for "
-                                + datasetQName
+                                "Plate created for "
+                                + plateQName
                                 + " ("
-                                + str(datasetID)
+                                + str(plateID)
                                 + ")"
                             )
                             hasNewImport = True
                         else:
-                            datasetID = omeDataset._obj.id.val
-                            datasetCurrentImportedData[import_status] = (
+                            plateID = omePlate._obj.id.val
+                            plateCurrentImportedData[import_status] = (
                                 import_status_found
                             )
                             writeToLog(
-                                "Dataset found for "
-                                + datasetQName
+                                "Plate found for "
+                                + plateQName
                                 + " ("
-                                + str(datasetID)
+                                + str(plateID)
                                 + ")"
                             )
                     else:
-                        datasetID = datasetFullImportedData[import_status_id]
-                        omeDataset = userConn.getObject("Dataset", datasetID)
-                        datasetCurrentImportedData[import_status] = (
+                        plateID = plateFullImportedData[import_status_id]
+                        omePlate = userConn.getObject("Plate", plateID)
+                        plateCurrentImportedData[import_status] = (
                             import_status_pimported
                         )
                         writeToLog(
-                            "Dataset previously imported for "
-                            + datasetQName
+                            "Plate previously imported for "
+                            + plateQName
                             + " ("
-                            + str(datasetID)
+                            + str(plateID)
                             + ")"
                         )
 
-                    datasetCurrentImportedData[import_status_id] = datasetID
+                    plateCurrentImportedData[import_status_id] = plateID
 
-                    datasetKeyValueData = []
+                    plateKeyValueData = []
                     # for dsAnnKey in dataset:
                     #     if dsAnnKey == metadata_images:
                     #         continue
                     #     datasetKeyValueData.append([dsAnnKey, dataset[dsAnnKey]])
-                    for moduleKey in dataset:
+                    for moduleKey in plate:
                         if (
-                            moduleKey == metadata_images
+                            moduleKey == metadata_wells
                             or moduleKey == excel_module_ome
                         ):
                             continue
-                        datasetKeyValueData.append([moduleKey, ""])
-                        for dsAnnKey in dataset[moduleKey]:
-                            value = dataset[moduleKey][dsAnnKey]
+                        plateKeyValueData.append([moduleKey, ""])
+                        for plAnnKey in plate[moduleKey]:
+                            value = plate[moduleKey][plAnnKey]
                             dataSplit = None
-                            if "description" not in dsAnnKey.lower() and isinstance(
+                            if "description" not in plAnnKey.lower() and isinstance(
                                 value, str
                             ):
                                 dataSplit = value.split(",")
                             if dataSplit != None and len(dataSplit) > 1:
                                 for i in range(0, len(dataSplit)):
-                                    datasetKeyValueData.append(
-                                        [dsAnnKey + "_" + str(i), str(dataSplit[i])]
+                                    plateKeyValueData.append(
+                                        [plAnnKey + "_" + str(i), str(dataSplit[i])]
                                     )
                             else:
-                                datasetKeyValueData.append([dsAnnKey, str(value)])
+                                plateKeyValueData.append([plAnnKey, str(value)])
                     if (
-                        datasetFullImportedData == None
-                        or import_annotate not in datasetFullImportedData
+                        plateFullImportedData == None
+                        or import_annotate not in plateFullImportedData
                         # or datasetFullImportedData[import_annotate] == False
                     ):
-                        if len(datasetKeyValueData) > 0:
-                            newDsMapAnn = MapAnnotationWrapper(userConn)
-                            newDsMapAnn.setNs(namespace)
-                            newDsMapAnn.setValue(datasetKeyValueData)
-                            newDsMapAnn.save()
-                            omeDataset.linkAnnotation(newDsMapAnn)
-                            datasetCurrentImportedData[import_annotate] = (
-                                newDsMapAnn._obj.id.val
+                        if len(plateKeyValueData) > 0:
+                            newPlMapAnn = MapAnnotationWrapper(userConn)
+                            newPlMapAnn.setNs(namespace)
+                            newPlMapAnn.setValue(plateKeyValueData)
+                            newPlMapAnn.save()
+                            omePlate.linkAnnotation(newPlMapAnn)
+                            plateCurrentImportedData[import_annotate] = (
+                                newPlMapAnn._obj.id.val
                             )
                             writeToLog(
                                 "Annotation created for "
-                                + datasetQName
+                                + plateQName
                                 + " ("
-                                + str(datasetID)
+                                + str(plateID)
                                 + ")"
                             )
                             hasNewImport = True
                         else:
-                            if len(datasetKeyValueData) > 0:
-                                dsMapAnnID = datasetFullImportedData[import_annotate]
-                                newDsMapAnn = userConn.getObject(
-                                    "MapAnnotation", dsMapAnnID
+                            if len(plateKeyValueData) > 0:
+                                plMapAnnID = plateFullImportedData[import_annotate]
+                                newPlMapAnn = userConn.getObject(
+                                    "MapAnnotation", plMapAnnID
                                 )
-                                newDsMapAnn.setValue(datasetKeyValueData)
+                                newPlMapAnn.setValue(plateKeyValueData)
                             writeToLog(
                                 "Annotation updated for "
-                                + datasetQName
+                                + plateQName
                                 + " ("
-                                + str(datasetID)
+                                + str(plateID)
                                 + ")"
                             )
                             hasNewImport = True
@@ -1954,7 +2105,23 @@ def main(argv, argc):
                     if omeUserName != None:
                         userConn.close()
 
-                    for image in dataset[metadata_images]:
+
+#continue here
+
+
+
+
+
+
+
+
+
+
+
+
+                    for well in plate[metadata_wells]:
+                        print("******")
+                        print(well)
                         # TODO: add time check somewhere below here
 
                         if omeUserName != None:
@@ -1963,17 +2130,17 @@ def main(argv, argc):
                         else:
                             userConn = conn
 
-                        printToConsole("image metadata")
-                        printToConsole(str(image))
+                        #printToConsole("image metadata")
+                        #printToConsole(str(image))
 
-                        imageName = image[metadata_image_name]
-                        imageNewName = image[metadata_image_new_name]
-                        imagePath = image[metadata_image_path]
+                        wellName = well[metadata_well_name]
+                        omeImageName = well[metadata_OME_Image_Name]
+                        filePath = well[metadata_file_path]
                         imageTags = None
-                        if metadata_image_tags1 in image:
-                            imageTags = image[metadata_image_tags1]
-                        elif metadata_image_tags2 in image:
-                            imageTags = image[metadata_image_tags2]
+                        if metadata_image_tags1 in well:
+                            imageTags = well[metadata_image_tags1]
+                        elif metadata_image_tags2 in well:
+                            imageTags = well[metadata_image_tags2]
                         else:
                             # TODO issue, raise
                             imageTags = []
@@ -1983,235 +2150,280 @@ def main(argv, argc):
                         imageFullImportedData = None
                         imageCurrentImportedData = None
                         if (
-                            datasetFullImportedData != None
-                            and imageName in datasetFullImportedData
+                            plateFullImportedData != None
+                            and wellName in plateFullImportedData
                         ):
-                            imageFullImportedData = datasetFullImportedData[imageName]
-                        if imageName not in datasetCurrentImportedData:
-                            datasetCurrentImportedData[imageName] = {}
-                        imageCurrentImportedData = datasetCurrentImportedData[imageName]
+                            imageFullImportedData = plateFullImportedData[wellName]
+                        if wellName not in plateCurrentImportedData:
+                            plateCurrentImportedData[wellName] = {}
+                        imageCurrentImportedData = plateCurrentImportedData[wellName]
                         imageID = None
                         omeImage = None
-                        imageQName = imagePath.replace(target, "")[1:]
+                        imageQName = filePath.replace(target, "")[1:]
                         # imageQName = os.path.join(datasetQName, relImagePath)
                         imageCurrentImportedData[import_path] = imageQName
                         if imageFullImportedData == None:
                             omeImage = None
-                            imgIDs = ezome.get_image_ids(userConn, dataset=datasetID)
+                            imgIDs = ezome.get_image_ids(userConn, dataset=plateID)
                             for imgID in imgIDs:
                                 omeImg = userConn.getObject("Image", imgID)
-                                if omeImg.getName() == imageNewName:
+                                if omeImg.getName() == omeImageName:
                                     omeImage = omeImg
                             # omeImage = userConn.getObject(
                             #     "Image", attributes={"name": imageNewName}
                             # )
                             if omeImage == None:
-                                imageID = ezome.ezimport(
-                                    userConn,
-                                    imagePath,
-                                    projectID,
-                                    datasetID,
-                                )[0]
-                                newImage = userConn.getObject("Image", imageID)
-                                newImage.setName(imageNewName)
-                                newImage.save()
-                                omeImage = newImage
-                                imageCurrentImportedData[import_status] = (
-                                    import_status_imported
-                                )
-                                imageID = newImage._obj.id.val
-                                writeToLog(
-                                    "Image imported for "
-                                    + imageQName
-                                    + " ("
-                                    + str(imageID)
-                                    + ")"
-                                )
-                                hasNewImport = True
-                                if destination != None:
-                                    imageCopyPath = imagePath.replace(
-                                        target, destination
-                                    )
-                                    imageCopyFolderPath = imageCopyPath.replace(
-                                        imageName, ""
-                                    )
-                                    os.makedirs(imageCopyFolderPath, exist_ok=True)
-                                    # TODO copy mma file here?
-                                    # TODO regex imageName*.json?
-                                    shutil.copy2(imagePath, imageCopyFolderPath)
-                                    writeToLog("Image copied for " + imageQName)
-                                if hasB2:
-                                    try:
-                                        response = upload_file(
-                                            b2BucketName,
-                                            imagePath,
-                                            imageName,
-                                            b2,
-                                            imageQName,
-                                        )
-                                        printToConsole("RESPONSE:  " + str(response))
-                                        # generate_friendly_url(NEW_BUCKET_NAME, endpoint, b2)
-                                    except ClientError as e:
-                                        error = (
-                                            "Client error during backblaze upload for "
-                                            + imageQName
-                                        )
-                                        writeToLog("ERROR: " + error)
-                                        writeToLog(repr(e))
-                                        printToConsole("ERROR: " + error)
-                                        printToConsole(repr(e))
-                                        sendErrorEmail(
-                                            emailTo,
-                                            adminsEmailTo,
-                                            error + repr(e),
-                                            emailFrom,
-                                            emailFromPSW,
-                                        )
+                                print("Image uploaded:",filePath)
+        #                         imageID = ezome.ezimport(
+        #                             userConn,
+        #                             imagePath,
+        #                             projectID,
+        #                             datasetID,
+        #                         )[0]
+        #                         newImage = userConn.getObject("Image", imageID)
+        #                         newImage.setName(imageNewName)
+        #                         newImage.save()
+        #                         omeImage = newImage
+        #                         imageCurrentImportedData[import_status] = (
+        #                             import_status_imported
+        #                         )
+        #                         imageID = newImage._obj.id.val
+        #                         writeToLog(
+        #                             "Image imported for "
+        #                             + imageQName
+        #                             + " ("
+        #                             + str(imageID)
+        #                             + ")"
+        #                         )
+        #                         hasNewImport = True
+        #                         if destination != None:
+        #                             imageCopyPath = imagePath.replace(
+        #                                 target, destination
+        #                             )
+        #                             imageCopyFolderPath = imageCopyPath.replace(
+        #                                 imageName, ""
+        #                             )
+        #                             os.makedirs(imageCopyFolderPath, exist_ok=True)
+        #                             # TODO copy mma file here?
+        #                             # TODO regex imageName*.json?
+        #                             shutil.copy2(imagePath, imageCopyFolderPath)
+        #                             writeToLog("Image copied for " + imageQName)
+        #                         if hasB2:
+        #                             try:
+        #                                 response = upload_file(
+        #                                     b2BucketName,
+        #                                     imagePath,
+        #                                     imageName,
+        #                                     b2,
+        #                                     imageQName,
+        #                                 )
+        #                                 printToConsole("RESPONSE:  " + str(response))
+        #                                 # generate_friendly_url(NEW_BUCKET_NAME, endpoint, b2)
+        #                             except ClientError as e:
+        #                                 error = (
+        #                                     "Client error during backblaze upload for "
+        #                                     + imageQName
+        #                                 )
+        #                                 writeToLog("ERROR: " + error)
+        #                                 writeToLog(repr(e))
+        #                                 printToConsole("ERROR: " + error)
+        #                                 printToConsole(repr(e))
+        #                                 sendErrorEmail(
+        #                                     emailTo,
+        #                                     adminsEmailTo,
+        #                                     error + repr(e),
+        #                                     emailFrom,
+        #                                     emailFromPSW,
+        #                                 )
 
-                                if hasDelete:
-                                    # TODO directories not removed because of CSV and MMA files?
-                                    os.remove(imagePath)
+        #                         if hasDelete:
+        #                             # TODO directories not removed because of CSV and MMA files?
+        #                             os.remove(imagePath)
 
-                            else:
-                                imageID = omeImage._obj.id.val
-                                imageCurrentImportedData[import_status] = (
-                                    import_status_found
-                                )
-                                writeToLog(
-                                    "Image found for "
-                                    + imageQName
-                                    + " ("
-                                    + str(imageID)
-                                    + ")"
-                                )
-                        else:
-                            imageID = imageFullImportedData[import_status_id]
-                            omeImage = userConn.getObject("Image", imageID)
-                            imageID = omeImage._obj.id.val
-                            imageCurrentImportedData[import_status] = (
-                                import_status_pimported
-                            )
-                            writeToLog(
-                                "Image previously imported for "
-                                + imageQName
-                                + " ("
-                                + str(imageID)
-                                + ")"
-                            )
+        #                     else:
+        #                         imageID = omeImage._obj.id.val
+        #                         imageCurrentImportedData[import_status] = (
+        #                             import_status_found
+        #                         )
+        #                         writeToLog(
+        #                             "Image found for "
+        #                             + imageQName
+        #                             + " ("
+        #                             + str(imageID)
+        #                             + ")"
+        #                         )
+        #                 else:
+        #                     imageID = imageFullImportedData[import_status_id]
+        #                     omeImage = userConn.getObject("Image", imageID)
+        #                     imageID = omeImage._obj.id.val
+        #                     imageCurrentImportedData[import_status] = (
+        #                         import_status_pimported
+        #                     )
+        #                     writeToLog(
+        #                         "Image previously imported for "
+        #                         + imageQName
+        #                         + " ("
+        #                         + str(imageID)
+        #                         + ")"
+        #                     )
 
-                        imageCurrentImportedData[import_status_id] = imageID
+        #                 imageCurrentImportedData[import_status_id] = imageID
 
-                        imageKeyValueData = []
-                        for imgAnnKey in image:
-                            if (
-                                imgAnnKey == metadata_image_new_name
-                                or imgAnnKey == metadata_image_path
-                                or imgAnnKey == metadata_image_mma
-                                or imgAnnKey == metadata_image_tags1
-                                or imgAnnKey == metadata_image_tags2
-                            ):
-                                continue
-                            imageKeyValueData.append([imgAnnKey, str(image[imgAnnKey])])
-                        if (
-                            imageFullImportedData == None
-                            or import_annotate not in imageFullImportedData
-                            # or imageFullImportedData[import_annotate] == False
-                        ):
-                            if len(imageKeyValueData) > 0:
-                                newImgMapAnn = MapAnnotationWrapper(userConn)
-                                newImgMapAnn.setNs(namespace)
-                                newImgMapAnn.setValue(imageKeyValueData)
-                                newImgMapAnn.save()
-                                omeImage.linkAnnotation(newImgMapAnn)
-                                writeToLog(
-                                    "Annotation created for "
-                                    + imageQName
-                                    + " ("
-                                    + str(imageID)
-                                    + ")"
-                                )
-                            if len(imageTags) > 0:
-                                for imgTag in imageTags:
-                                    omeTags = userConn.getObjects(
-                                        "TagAnnotation",
-                                        attributes={"textValue": imgTag},
-                                    )
-                                    omeTagAnn = None
-                                    for omeTagTmp in omeTags:
-                                        omeTagAnn = omeTagTmp
-                                        break
-                                    if omeTagAnn == None:
-                                        newImgTagAnn = TagAnnotationWrapper(userConn)
-                                        newImgTagAnn.setValue(imgTag)
-                                        newImgTagAnn.save()
-                                        omeTagAnn = newImgTagAnn
-                                    omeImage.linkAnnotation(omeTagAnn)
-                                writeToLog(
-                                    "Tags created for "
-                                    + imageQName
-                                    + " ("
-                                    + str(imageID)
-                                    + ")"
-                                )
-                            imageCurrentImportedData[import_annotate] = (
-                                newImgMapAnn._obj.id.val
-                            )
-                            hasNewImport = True
-                        else:
-                            if len(imageKeyValueData) > 0:
-                                imgMapAnnID = imageFullImportedData[import_annotate]
-                                newImgMapAnn = userConn.getObject(
-                                    "MapAnnotation", imgMapAnnID
-                                )
-                                newImgMapAnn.setValue(imageKeyValueData)
-                            writeToLog(
-                                "Annotation updated for "
-                                + imageQName
-                                + " ("
-                                + str(imageID)
-                                + ")"
-                            )
-                            hasNewImport = True
+        #                 imageKeyValueData = []
+        #                 for imgAnnKey in image:
+        #                     if (
+        #                         imgAnnKey == metadata_image_new_name
+        #                         or imgAnnKey == metadata_image_path
+        #                         or imgAnnKey == metadata_image_mma
+        #                         or imgAnnKey == metadata_image_tags1
+        #                         or imgAnnKey == metadata_image_tags2
+        #                     ):
+        #                         continue
+        #                     imageKeyValueData.append([imgAnnKey, str(image[imgAnnKey])])
+        #                 if (
+        #                     imageFullImportedData == None
+        #                     or import_annotate not in imageFullImportedData
+        #                     # or imageFullImportedData[import_annotate] == False
+        #                 ):
+        #                     if len(imageKeyValueData) > 0:
+        #                         newImgMapAnn = MapAnnotationWrapper(userConn)
+        #                         newImgMapAnn.setNs(namespace)
+        #                         newImgMapAnn.setValue(imageKeyValueData)
+        #                         newImgMapAnn.save()
+        #                         omeImage.linkAnnotation(newImgMapAnn)
+        #                         writeToLog(
+        #                             "Annotation created for "
+        #                             + imageQName
+        #                             + " ("
+        #                             + str(imageID)
+        #                             + ")"
+        #                         )
+        #                     if len(imageTags) > 0:
+        #                         for imgTag in imageTags:
+        #                             omeTags = userConn.getObjects(
+        #                                 "TagAnnotation",
+        #                                 attributes={"textValue": imgTag},
+        #                             )
+        #                             omeTagAnn = None
+        #                             for omeTagTmp in omeTags:
+        #                                 omeTagAnn = omeTagTmp
+        #                                 break
+        #                             if omeTagAnn == None:
+        #                                 newImgTagAnn = TagAnnotationWrapper(userConn)
+        #                                 newImgTagAnn.setValue(imgTag)
+        #                                 newImgTagAnn.save()
+        #                                 omeTagAnn = newImgTagAnn
+        #                             omeImage.linkAnnotation(omeTagAnn)
+        #                         writeToLog(
+        #                             "Tags created for "
+        #                             + imageQName
+        #                             + " ("
+        #                             + str(imageID)
+        #                             + ")"
+        #                         )
+        #                     imageCurrentImportedData[import_annotate] = (
+        #                         newImgMapAnn._obj.id.val
+        #                     )
+        #                     hasNewImport = True
+        #                 else:
+        #                     if len(imageKeyValueData) > 0:
+        #                         imgMapAnnID = imageFullImportedData[import_annotate]
+        #                         newImgMapAnn = userConn.getObject(
+        #                             "MapAnnotation", imgMapAnnID
+        #                         )
+        #                         newImgMapAnn.setValue(imageKeyValueData)
+        #                     writeToLog(
+        #                         "Annotation updated for "
+        #                         + imageQName
+        #                         + " ("
+        #                         + str(imageID)
+        #                         + ")"
+        #                     )
+        #                     hasNewImport = True
 
-                        if (
-                            startTimeHr != None
-                            and startTimeMin != None
-                            and endTimeHr != None
-                            and endTimeMin != None
-                        ):
-                            now = datetime.now()
-                            if now.hour < startTimeHr and now.hour > endTimeHr:
-                                endTimePassed = True
-                            if now.hour == endTimeHr and now.minute > endTimeMin:
-                                endTimePassed = True
-                            if now.hour == startTimeHr and now.minute < startTimeMin:
-                                endTimePassed = True
+        #                 if (
+        #                     startTimeHr != None
+        #                     and startTimeMin != None
+        #                     and endTimeHr != None
+        #                     and endTimeMin != None
+        #                 ):
+        #                     now = datetime.now()
+        #                     if now.hour < startTimeHr and now.hour > endTimeHr:
+        #                         endTimePassed = True
+        #                     if now.hour == endTimeHr and now.minute > endTimeMin:
+        #                         endTimePassed = True
+        #                     if now.hour == startTimeHr and now.minute < startTimeMin:
+        #                         endTimePassed = True
 
-                        if omeUserName != None:
-                            userConn.close()
+        #                 if omeUserName != None:
+        #                     userConn.close()
 
-                        if endTimePassed:
-                            break
-                    if endTimePassed:
-                        break
-                if endTimePassed:
-                    break
-            if endTimePassed:
-                break
+        #                 if endTimePassed:
+        #                     break
+        #             if endTimePassed:
+        #                 break
+        #         if endTimePassed:
+        #             break
+        #     if endTimePassed:
+        #         break
 
-        sendCompleteEmail(
-            emailTo,
-            adminsEmailTo,
-            hasNewImport,
-            currentImportedData[userFolder],
-            emailFrom,
-            emailFromPSW,
-        )
-
-        conn.close()
-        printToConsole("Close connection")
+        # sendCompleteEmail(
+        #     emailTo,
+        #     adminsEmailTo,
+        #     hasNewImport,
+        #     currentImportedData[userFolder],
+        #     emailFrom,
+        #     emailFromPSW,
+        # )
         if endTimePassed:
             break
+
+    # ADD LOGIC THAT SORTS IMAGES INTO SPW
+
+    #read entire excel table line by line, and sort each image into SPW. Return the dataset folder name too.
+    imageList,imageFolder = readExcelTable(excelFile)
+
+
+    #check if the screen already exists, if not create it
+    screenId = ""
+    plateId = ""
+
+    #get the plate name from one of the images
+    plateName = imageList[0][1].split("_")[0]
+
+    screens = list(conn.getObjects("Screen"))
+    for i in screens:
+        if i.getName() == imageFolder:
+            screenId = i.getId()
+            #find the plate within the screen
+            plates = list(i.listChildren())
+            for plate in plates:
+                if plate.getName() == plateName:
+                    plateId = plate.getId()
+
+    
+    if not screenId:
+        screenId = ezomero.post_screen(conn, imageFolder)
+        #create the plate too
+        plateId = createPlate(conn,plateName,screenId)
+
+    #get the number of sites in each well
+    siteNum = max([int(row[5][1:]) for row in imageList])
+
+    addSitesToWells(conn,screenId,plateId,siteNum,imageList)
+    
+
+
+    # checks if each image has been added to a site in a well. If not, then it adds the image
+    # siteCount: number of sites used in a well. images: the list of images being used
+    #addSitesToWells(conn,screenId,plateNames,images)
+    #while True:
+        #add all sites starting from 1, when a number doesn't exist then break
+
+    print("done")
+    conn.close()
+    printToConsole("Close connection")
+    
 
     writeCurrentImported(currentImportedData)
     if fullImportedData != None:

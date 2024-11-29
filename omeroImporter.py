@@ -107,11 +107,16 @@ import_annotate = "annotated"
 
 metadata_plates = "plates"
 metadata_wells = "wells"
+metadata_site = "Site"
 metadata_well_name = "Well_Name"
+metadata_OME_Images = "OME_Images"
 metadata_OME_Image_Name = "OME_Image_Name"
+metadata_files = "Files"
+
 metadata_file_name = "File_Name"
 metadata_file_path = "File_Path"
 metadata_image_mma = "MMA_File_Path"
+metadata_C_index = "C"
 metadata_Z_index = "Z"
 metadata_T_index = "T"
 metadate_Site_index = "Site"
@@ -127,6 +132,8 @@ excel_plate = 1
 excel_plateName = "Plate_Name"
 
 excel_plateMap = 2
+
+excel_WellImageMap = 3
 excel_module = "Module"
 excel_key = "Key"
 excel_value = "Value"
@@ -869,10 +876,9 @@ def collectMetadataFromExcel(path):
             ).fillna(excel_replaceNaN)
             ssPlateData = parseSpreadsheetData(ssFilePlateData, excel_plateName)
             plateName = list(ssPlateData.keys())[0]
-
-
             if plateName not in data[screenName][metadata_plates]:
                 data[screenName][metadata_plates].update(ssPlateData)
+
             if metadata_wells not in data[screenName][metadata_plates][plateName]:
                 data[screenName][metadata_plates][plateName][metadata_wells] = {}
             ssFileWellListData = pd.read_excel(
@@ -883,9 +889,45 @@ def collectMetadataFromExcel(path):
                 metadata_wells
             ] = ssPlateMapData
 
+            ssWellImageMapData = pd.read_excel(path, sheet_name=excel_WellImageMap).fillna(excel_replaceNaN)
+            testData = parseImageListSpreadsheetData(ssWellImageMapData)
+            
+            # ADD OME_IMAGE NAMES AND FILE NAMES TO WELL DATA
+            for entry in testData:
+                wellName = entry.pop(metadata_well_name)
+                ome_image_name = entry.pop(metadata_OME_Image_Name)
+                for plate in data[screenName][metadata_plates].values():
+                    for well in plate[metadata_wells]:
+                        if well[metadata_well_name] == wellName:
+                            if metadata_OME_Images not in well:
+                                well[metadata_OME_Images] = []
+                            # Check if the OME_Image already exists in the well
+                            ome_image_entry = next((img for img in well[metadata_OME_Images] if img[metadata_OME_Image_Name] == ome_image_name), None)
+                            if ome_image_entry is None:
+                                # Create a new OME_Image entry
+                                ome_image_entry = {
+                                    metadata_OME_Image_Name: ome_image_name,
+                                    metadata_files: []
+                                }
+                                well[metadata_OME_Images].append(ome_image_entry)
+                            # Add the file information to the OME_Image entry
+                            ome_image_entry[metadata_files].append(entry)
+            
+            # get number of sites in each well, and the z,c,t of the images
+            site,zStep,channel,timepoint = 0,0,0,0
+            for plate in data[screenName][metadata_plates].values():
+                for well in plate[metadata_wells]:
+                    if metadata_OME_Images in well:
+                        for ome_image_entry in well[metadata_OME_Images]:
+                            for image in ome_image_entry[metadata_files]:
+                                site = max(site, image[metadata_site])
+                                c = max(channel, image[metadata_C_index])
+                                z = max(zStep, image[metadata_Z_index])
+                                t = max(timepoint, image[metadata_T_index]) 
+
     #printToConsole("Data:")
     #printToConsole(str(data))
-    return data, excelPath
+    return data, excelPath, site, z, c, t
 
 # This function returns the data from an excel file, starting at a specific cell and reading onwards.
 def readExcelTable(file):
@@ -981,7 +1023,10 @@ def createWell(conn,plateId, row, col):
 
 
 # create a well sample with a given image
-def createWellSample(conn,well,imageId):
+def createWellSample(conn,wellid,imageId):
+    wellWrapper = conn.getObject("well",wellid, opts={"load_images": True})
+    well = wellWrapper._obj
+
     ws = WellSampleI()
     ws.setImage(ImageI(imageId,False))
     well.addWellSample(ws)
@@ -1086,6 +1131,12 @@ def main(argv, argc):
     adminsEmailTo = None
     emailFrom = None
     emailFromPSW = None
+
+    # Well and Image params
+    site = 0
+    zStep = 0
+    channel = 0
+    timepoint = 0
 
     # User param
     userDirectoryPath = None
@@ -1775,7 +1826,7 @@ def main(argv, argc):
                 )
                 printToConsole(error)
                 writeToLog(error)
-                continue
+                continue  
 
         # find group_id using group name ?
         # userConn.SERVICE_OPTS.setOmeroGroup(group_id)
@@ -1794,7 +1845,7 @@ def main(argv, argc):
             data = None
             namespace = omero.constants.metadata.NSCLIENTMAPANNOTATION
             try:
-                data,excelFile = collectMetadataFromExcel(projectPath)
+                data,excelFile,site,zStep,channel,timepoint = collectMetadataFromExcel(projectPath)
             except WrappedException as e:
                 error = e.message
                 writeToLog(error)
@@ -1818,7 +1869,6 @@ def main(argv, argc):
             if data == None or data == {}:
                 continue
 
-            print(data)
             for screenKey in data:
                 screen = data[screenKey]
                 screenFullImportedData = None
@@ -2080,7 +2130,20 @@ def main(argv, argc):
                         userConn.close()
 
 
-#CONTINUE HERE. FIND A WAY TO ADD WELL-IMAGE-MAP TO DATA
+
+
+
+
+
+
+
+
+
+
+
+
+
+
                     # **for each row in the Plate-Map
                     for well in plate[metadata_wells]:
                         wellName = well[metadata_well_name]
@@ -2117,11 +2180,11 @@ def main(argv, argc):
                                 newWell = None
                                 row,col = getWellCoords(wellName)
 
-                                newWell = createWell(conn,plateID, row, col)
+                                newWell = createWell(userConn,plateID, row, col)
 
                                 omeWell = newWell
 
-                                for w in conn.getObject("Plate",plateID).listChildren():
+                                for w in userConn.getObject("Plate",plateID).listChildren():
                                     if w.getRow() == row and w.getColumn() == col:
                                         wellID = w.getId()
 
@@ -2214,108 +2277,139 @@ def main(argv, argc):
                             )
                             hasNewImport = True
 
-        #now we combine images and add them to each well
-        # first, get the z,c,t of the images
+                        #now we combine images and add them to each well
+                        if metadata_OME_Images not in well:
+                            continue
+                        for imagekey in well[metadata_OME_Images]:
+                            omeImageName = imagekey[metadata_OME_Image_Name]
+                            
+                            if omeUserName != None:
+                                userConn = conn.suConn(omeUserName)
+                                # userConn.c.enableKeepAlive(60)
+                            else:
+                                userConn = conn
+
+                            imgFullImportedData = None
+                            imgCurrentImportedData = None
+                            if (
+                                wellFullImportedData != None
+                                and omeImageName in wellFullImportedData
+                            ):
+                                imgFullImportedData = wellFullImportedData[omeImageName]
+
+                            if omeImageName not in wellCurrentImportedData:
+                                wellCurrentImportedData[omeImageName] = {}
+                            imgCurrentImportedData = wellCurrentImportedData[omeImageName]
+
+                            imageId = None
+                            omeImage = None
+                            if imgFullImportedData == None:
+                                imgIDs = ezome.get_image_ids(userConn)
+                                omeImage = None
+                                for imgID in imgIDs:
+                                    omeI = userConn.getObject("Image", imgID)
+                                    if omeI.getName() == omeImageName:
+                                        omeImage = omeI
+                                
+                                #if the image doesnt exist, create it
+                                if omeImage == None:
+                                    files = imagekey[metadata_files]
+                                    imageList = []
+                                    for s in range (1,site+1):
+                                        for c in range(1,channel+1):
+                                            for t in range(1, timepoint+1):
+                                                for z in range(1,zStep+1):
+                                                    for file in files:
+                                                        if file[metadata_Z_index] == z and file[metadata_T_index] == t and file[metadata_C_index] == c and file[metadate_Site_index] == s:
+                                                            imageList.append(file[metadata_file_path])
+
+                                    #store each image after they go through imread()
+                                    imageDict = {}
+                                    for i, image in enumerate(imageList):
+                                        imageDict[i+1] = imread(image)
+                                    
+                                    #add these images back into a list
+                                    planes = list(imageDict.values())
+
+                                    def planeGen():
+                                        for p in planes:
+                                            yield p
+                                    
+                                    omeImage = userConn.createImageFromNumpySeq(
+                                        planeGen(),omeImageName, zStep,channel,timepoint
+                                    )
+
+                                    imgCurrentImportedData[import_status] = (
+                                        import_status_imported
+                                    )
+
+                                    #now that the image/site is created, we can add it to the well
+                                    print("*********************************")
+                                    createWellSample(userConn,wellID,imageId)
+
+                                    # fix addind sites to well sample
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                    
+                                    imageId = omeImage.getId()
+                                    writeToLog(
+                                        "Image created for "
+                                        + omeImageName
+                                        + " ("
+                                        + str(imageId)
+                                        + ")"
+                                    )
+                                    hasNewImport = True
+                                
+                                else:
+                                    imageId = omeImage._obj.id.val
+                                    imgCurrentImportedData[import_status] = (
+                                        import_status_found
+                                    )
+                                    writeToLog(
+                                        "Image found for "
+                                        + omeImageName
+                                        + " ("
+                                        + str(imageId)
+                                        + ")"
+                                    )   
+                            else:
+                                imageId = imgFullImportedData[import_status_id]
+                                omeImage = userConn.getObject("Image", imageId)
+                                imgCurrentImportedData[import_status] = (
+                                    import_status_pimported
+                                )
+                                writeToLog(
+                                    "Image previously imported for "
+                                    + omeImageName
+                                    + " ("
+                                    + str(imageId)
+                                    + ")"
+                                )
+                        imgCurrentImportedData[import_status_id] = imageId                                                      
+
+
+
+
+
                      
                         
 
 
-# #check names
-#                             if omeImage == None:
-#                                 imageID = ezome.ezimport(
-#                                     userConn,
-#                                     filePath,
-#                                 )[0]
-#                                 newImage = userConn.getObject("Image", imageID)
-
-#                                 #TODO: check if this is the correct name
-#                                 newImage.setName(omeImageName)
-#                                 newImage.save()
-#                                 omeImage = newImage
-#                                 imageCurrentImportedData[import_status] = (
-#                                     import_status_imported
-#                                 )
-#                                 imageID = newImage._obj.id.val
-#                                 writeToLog(
-#                                     "Image imported for "
-#                                     + fileName
-#                                     + " ("
-#                                     + str(imageID)
-#                                     + ")"
-#                                 )
-#                                 hasNewImport = True
-#                                 if destination != None:
-#                                     imageCopyPath = filePath.replace(
-#                                         target, destination
-#                                     )
-#                                     imageCopyFolderPath = imageCopyPath.replace(
-#                                         imageName, ""
-#                                     )
-#                                     os.makedirs(imageCopyFolderPath, exist_ok=True)
-#                                     # TODO copy mma file here?
-#                                     # TODO regex imageName*.json?
-#                                     shutil.copy2(filePath, imageCopyFolderPath)
-#                                     writeToLog("Image copied for " + fileName)
-#                                 if hasB2:
-#                                     try:
-#                                         response = upload_file(
-#                                             b2BucketName,
-#                                             filePath,
-#                                             imageName,
-#                                             b2,
-#                                             fileName,
-#                                         )
-#                                         printToConsole("RESPONSE:  " + str(response))
-#                                         # generate_friendly_url(NEW_BUCKET_NAME, endpoint, b2)
-#                                     except ClientError as e:
-#                                         error = (
-#                                             "Client error during backblaze upload for "
-#                                             + fileName
-#                                         )
-#                                         writeToLog("ERROR: " + error)
-#                                         writeToLog(repr(e))
-#                                         printToConsole("ERROR: " + error)
-#                                         printToConsole(repr(e))
-#                                         sendErrorEmail(
-#                                             emailTo,
-#                                             adminsEmailTo,
-#                                             error + repr(e),
-#                                             emailFrom,
-#                                             emailFromPSW,
-#                                         )
-
-#                                 if hasDelete:
-#                                     # TODO directories not removed because of CSV and MMA files?
-#                                     os.remove(fileName)
-
-#                             else:
-#                                 imageID = omeImage._obj.id.val
-#                                 imageCurrentImportedData[import_status] = (
-#                                     import_status_found
-#                                 )
-#                                 writeToLog(
-#                                     "Image found for "
-#                                     + fileName
-#                                     + " ("
-#                                     + str(imageID)
-#                                     + ")"
-#                                 )
-#                         else:
-#                             imageID = imageFullImportedData[import_status_id]
-#                             omeImage = userConn.getObject("Image", imageID)
-#                             imageID = omeImage._obj.id.val
-#                             imageCurrentImportedData[import_status] = (
-#                                 import_status_pimported
-#                             )
-#                             writeToLog(
-#                                 "Image previously imported for "
-#                                 + fileName
-#                                 + " ("
-#                                 + str(imageID)
-#                                 + ")"
-#                             )
-
-#                         imageCurrentImportedData[import_status_id] = imageID
+                        # Old image annotation code
 
                         # imageKeyValueData = []
                         # for imgAnnKey in image:

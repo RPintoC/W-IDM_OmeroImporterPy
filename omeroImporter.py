@@ -12,6 +12,9 @@ import xlwings
 import ezomero
 from imageio.v2 import imread
 
+#FIXME: images will not be uploaded to OMERO if there is a .HTD file in the same folder. https://forum.image.sc/t/issues-importing-images-with-ezomero-on-python/104761 
+#FIXME: multi-channel images are being created using createImageFromNumpySeq. https://forum.image.sc/t/recombine-planes-z-c-t-in-a-single-image/103543 
+
 # BACKBLAZE
 import boto3  # REQUIRED! - Details here: https://pypi.org/project/boto3/
 from botocore.exceptions import ClientError
@@ -2131,7 +2134,11 @@ def main(argv, argc):
                                 wellAnnKey == metadata_file_name
                             ):
                                 continue
-                            wellKeyValueData.append([wellAnnKey, str(well[wellAnnKey])])
+
+                            # we don't add image information to well metadata
+                            if wellAnnKey != metadata_OME_Images:
+                                wellKeyValueData.append([wellAnnKey, str(well[wellAnnKey])])
+
                         if (
                             wellFullImportedData == None
                             or import_annotate not in wellFullImportedData
@@ -2207,6 +2214,7 @@ def main(argv, argc):
                                     if omeI.getName() == omeImageName:
                                         omeImage = omeI
                                 
+                                #TODO: if a dataset is partially uploaded, upload the remaining images
                                 #if the image doesnt exist, create it
                                 if omeImage == None:
                                     files = imagekey[metadata_files]

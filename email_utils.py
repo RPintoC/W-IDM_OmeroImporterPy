@@ -6,7 +6,8 @@ from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import pathlib
-from file_utils import outputLogFilePath, outputImportedFilePath
+#from file_utils import outputLogFilePath, outputImportedFilePath
+import file_utils
 from data_classes import EmailConfig
 
 def sendErrorEmail(eConfig: EmailConfig, error: str):
@@ -32,7 +33,7 @@ def sendErrorEmail(eConfig: EmailConfig, error: str):
         if eConfig.emailTo:
             sendEmail(eConfig, subject, body)
         if eConfig.adminsEmailTo:
-            sendAdminEmail(eConfig, subject, body, attachments=[outputLogFilePath, outputImportedFilePath])
+            sendAdminEmail(eConfig, subject, body, attachments=[file_utils.outputLogFilePath, file_utils.outputImportedFilePath])
 
 def sendCompleteEmail(eConfig: EmailConfig, hasNewImport: bool, results: dict):
     """
@@ -69,7 +70,7 @@ def sendCompleteEmail(eConfig: EmailConfig, hasNewImport: bool, results: dict):
     if eConfig.emailTo:
         sendEmail(eConfig, subject, body)
     if eConfig.adminsEmailTo:
-        sendAdminEmail(eConfig, subject, body, attachments=[outputLogFilePath, outputImportedFilePath])
+        sendAdminEmail(eConfig, subject, body, attachments=[file_utils.outputLogFilePath, file_utils.outputImportedFilePath])
 
 def sendEmail(eConfig: EmailConfig, subject: str, body: str):
     """
